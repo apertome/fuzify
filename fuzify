@@ -1,0 +1,207 @@
+#!/usr/bin/python
+
+import os
+import sys
+import argparse
+import pprint
+import MySQLdb
+from mutagen.id3 import ID3, TIT2
+from mutagen.mp3 import MP3
+from mutagen.oggvorbis import OggVorbis, OggVorbisInfo
+from mutagen.flac import Picture, error as FLACError
+from path import path
+import base64
+
+discarded_file = 'discarded.log'
+retained_file = 'retained.log'
+folder_image_name = 'folder'
+extensions = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/gif": "gif",
+        }
+
+
+def write_image_file(path, ext, data, verbose): 
+    filename = folder_image_name + "." + ext
+    filename = os.path.join(path, filename)
+    if os.path.isdir(path):
+        if os.path.isfile(filename):
+            if verbose:
+                print filename, " exists"
+        else:
+            if verbose:
+                print "Writing " , filename, " ..."
+            outfile = open(filename, "wb")
+            outfile.write(data)
+            outfile.close()         
+    else:
+        if verbose:
+            print "Path does not exist"
+
+
+
+def process_files(root_dir, verbose, debug):
+    total_num_tags = 0
+    total_bytes = 0
+    ogg_bytes = 0
+    mp3_bytes = 0
+    version_2_3_0 = 0
+    version_2_4_0 = 0
+    other_version = 0
+    audio_extensions = ['*.mp3', '*.ogg']
+    ogg_allowed_tags = [
+            'artist',
+            'album',
+            'tracknumber',
+            'tracktotal',
+            'discnumber',
+            'disctotal',
+            'date',
+            'albumartist',
+            'genre',
+            'style',
+            'title',
+            'composer'
+        ]
+    mp3_allowed_tags = [
+            'TALB',     #Title Album
+            'TCON', #Genre (Content Type)
+            'TDRC', #Year (Recording Time)
+            'TIT2', #Title/songname/content description
+            'TPE1', #Lead performer/soloist
+            'TPE2', #Band/orchestra/accompaniment
+            'TRCK', #Track Number
+            'TPOS', #Part of Set
+        ]
+
+    dir = path(root_dir)
+
+    if debug:
+        discarded = open(discarded_file, 'w')
+        retained = open(retained_file, 'w')
+    for ext in audio_extensions:
+        for f in dir.walkfiles(ext):
+            if f.name.startswith('._'):
+                continue
+            if verbose:
+                print f.relpath().encode('utf-8')
+
+            if f.name.endswith('.ogg'):
+                audio2 = OggVorbis(f)
+                ogg_changes = 0
+                # extract the images BEFORE removing tags
+                for b64_data in audio2.get("metadata_block_picture", []):
+                    try:
+                        data = base64.b64decode(b64_data)
+                    except (TypeError, ValueError):
+                        print "Type/Value error ", TypeError, ValueError
+                        pass
+                    try:
+                        picture = Picture(data)
+                    except FLACError:
+                        print "FLAC error ", FlacError
+                        pass
+                    ext2 = extensions.get(picture.mime, "jpg")
+                    write_image_file(f.dirname(), ext2, picture.data, verbose)
+                for tag in reversed(audio2.tags):
+                    # note: this is not hitting all the tags
+                    key = tag[0].lower()
+                    #if verbose:
+                    #    print "tag: " , tag[0].encode('utf-8')
+                    if key in map(lambda name: name.lower(), ogg_allowed_tags):
+                        if verbose:
+                            print "Including key: ", key
+                        if debug:
+                            retained.write(tag[0].encode('utf-8') + ' ')
+                    else:   
+                        if verbose:
+                            print "Excluding key: ", key
+                        if debug:
+                            discarded.write(tag[0].encode('utf-8') + ' ')
+                        total_bytes += len(tag[1].encode('utf-8'))
+                        ogg_bytes += len(tag[1].encode('utf-8'))
+                        del audio2[tag[0]]
+                        ogg_changes += 1
+                if ogg_changes > 0:
+                    if debug:
+                        discarded.write(  f.relpath().encode('utf-8')  )
+                    try:
+                        audio2.save()
+                    except:
+                        print "*** Unexpected error:", sys.exc_info()[0]
+                        raise
+
+            if f.name.endswith('.mp3'):
+                try:
+                    audio = ID3(f)
+                except:
+                    print "Error opening mp3: ", f.relpath().encode('utf-8')
+                    continue
+
+                if audio.version == (2, 3, 0):
+                    version_2_3_0 += 1
+                else:
+                    other_version += 1
+
+                for key, value in audio.iteritems():
+                    #print key.encode('utf-8');
+                    if key.lower() in map(lambda name: name.lower(), mp3_allowed_tags):
+                        #print "Retaining mp3 tag: ", key, value
+                        if debug:
+                            retained.write(str(value)) 
+                    elif key.lower() == 'apic:':
+                        #print "Found image! ", key.encode('utf-8')
+                        write_image_file(f.dirname(), 'jpg', value.data, verbose);
+                        audio.delall(key)
+                        if debug:
+                            discarded.write(str(value))
+                        total_bytes += len(str(value))
+
+                    else:
+                        #print "Discarding mp3 tag: ", key
+                        if debug:
+                            discarded.write(str(value))
+                        total_bytes += len(str(value))
+                        mp3_bytes += len(str(value))
+                        audio.delall(key)
+
+
+                audio.update_to_v23()
+                audio.save(v1=0, v2_version=3)
+
+                #except:
+                #    print "Error"
+                #print f.name, f.parent.abspath()
+                #print "f.name=", f.name, path
+    if debug:
+        discarded.close()
+        retained.close()
+    print "Number of tags: ", total_num_tags
+    print "Total bytes stripped: ", total_bytes
+    print "OGG bytes stripped: ", ogg_bytes
+    print "MP3 bytes stripped: ", mp3_bytes
+    print "version 2.3.0: " , version_2_3_0
+    print "other versions: " , other_version
+
+filename = ''
+parser = argparse.ArgumentParser(description='Fuzify strips unnecessary metadata from media files. NOTE: this acts recursively on all mp3/ogg files found in the directory you specify.')
+#parser.add_argument('-r', '--recursive', help='Operate recursively', required=False)
+parser.add_argument('-v', action='store_true', dest='verbose', help='Verbose (increase debugging output)', required=False, default=False)
+parser.add_argument('-d', action='store_true', dest='debug', help='Debug mode (outputs debugging logs)', required=False, default=False)
+parser.add_argument('filename', help='File/directory to operate on')
+
+args = parser.parse_args()
+verbose = args.verbose
+debug = args.debug
+
+rootstr = args.filename
+root = path(rootstr)
+process_files(root, verbose, debug)
+
+# see mutagen docs:
+# http://mutagen.readthedocs.org/en/latest/tutorial.html
+# id3 frames:
+# http://id3.org/id3v2.4.0-frames
+
+
