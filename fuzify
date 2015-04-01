@@ -170,10 +170,6 @@ def process_files(root_dir, verbose, debug):
                 audio.update_to_v23()
                 audio.save(v1=0, v2_version=3)
 
-                #except:
-                #    print "Error"
-                #print f.name, f.parent.abspath()
-                #print "f.name=", f.name, path
     if debug:
         discarded.close()
         retained.close()
